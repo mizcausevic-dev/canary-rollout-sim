@@ -1,0 +1,10 @@
+{
+  "name": "canary-rollout-sim",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Progressive delivery simulator with automated statistical canary analysis.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": { "test": "node --test", "start": "python3 -m http.server 8080" },
+  "engines": { "node": ">=20" }
+}

@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Canary Rollout Sim: progressive delivery with automated canary analysis</title>
+  <meta name="description" content="Simulate a canary rollout with statistically sound automated analysis (Fisher's exact test, Mann-Whitney U, Bonferroni across looks) and see how much a bad deploy is contained.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%230b0c10%27/%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%276%27 fill=%27%2366fcf1%27/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="src/styles.css">
+</head>
+<body>
+<header class="site"><div class="wrap">
+  <a class="brand" href="./"><span class="dot" aria-hidden="true"></span>Canary Rollout Sim</a>
+  <nav><a href="#how">How it works</a><a href="https://github.com/mizcausevic-dev/canary-rollout-sim">GitHub</a></nav>
+</div></header>
+
+<main class="wrap">
+  <section class="hero">
+    <div class="eyebrow">Progressive delivery · Release engineering</div>
+    <h1>Ship a bad build to 1% of users, not 100%.</h1>
+    <p>Configure a canary rollout, inject a regression, and watch automated analysis compare canary to baseline at every step. It promotes or rolls back with statistics that hold up: exact tests at small counts and a false-positive budget split across every look.</p>
+  </section>
+
+  <div class="grid cols-2">
+    <form class="card" id="controls" autocomplete="off" novalidate>
+      <h2>Scenario</h2>
+      <div class="field">
+        <label for="scenario">Preset</label>
+        <select id="scenario">
+          <option value="error">Error regression: 0.5% → 3%</option>
+          <option value="latency">Latency regression: p50 +40%</option>
+          <option value="subtle">Subtle regression: 0.5% → 1%</option>
+          <option value="healthy">Healthy release</option>
+          <option value="custom">Custom</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <div class="field"><label for="rpm">Requests / min</label><input id="rpm" type="number" min="10" max="1000000" value="3000"></div>
+        <div class="field"><label for="seed">Random seed</label><input id="seed" type="number" min="0" max="4294967295" value="42"></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label for="berr">Baseline errors (%)</label><input id="berr" type="number" step="0.01" min="0" max="99" value="0.5"></div>
+        <div class="field"><label for="cerr">Canary errors (%)</label><input id="cerr" type="number" step="0.01" min="0" max="99" value="3"></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label for="lat">Baseline p50 (ms)</label><input id="lat" type="number" min="1" max="60000" value="120"></div>
+        <div class="field"><label for="latmul">Canary latency ×</label><input id="latmul" type="number" step="0.05" min="0.1" max="20" value="1"></div>
+      </div>
+      <h2 class="mt-8">Rollout policy</h2>
+      <div class="field">
+        <label for="steps">Steps (weight%:bake minutes)</label>
+        <input id="steps" value="1:10, 5:10, 25:15, 50:15, 100:0" maxlength="200">
+        <div class="hint">The last step must be 100.</div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label for="alpha">Family-wise α</label><input id="alpha" type="number" step="0.001" min="0.0001" max="0.2" value="0.01"></div>
+        <div class="field"><label for="interval">Analyze every (min)</label><input id="interval" type="number" min="1" max="60" value="5"></div>
+      </div>
+      <div class="error-box" id="err" role="alert"></div>
+    </form>
+
+    <div class="stack">
+      <div class="grid cols-4" id="tiles" aria-live="polite"></div>
+      <section class="card">
+        <h2>Error rate by minute <small>canary vs baseline · shaded = canary traffic weight</small></h2>
+        <svg class="chart" id="chart" viewBox="0 0 800 280" role="img" aria-label="Canary and baseline error rate over the rollout"></svg>
+        <div class="legend"><span><i class="c-canary"></i>canary error rate</span><span><i class="c-base"></i>baseline error rate</span><span><i class="c-weight"></i>canary weight</span></div>
+      </section>
+      <section class="card">
+        <h2>Analysis log</h2>
+        <div class="table-scroll"><table id="log"><thead><tr>
+          <th class="num">Min</th><th class="num">Weight</th><th>Result</th><th class="num">Δ errors</th><th class="num">p (errors)</th><th class="num">p50 ratio</th><th class="num">p (latency)</th>
+        </tr></thead><tbody></tbody></table></div>
+      </section>
+      <section class="card">
+        <h2>Is the analysis trustworthy? <small>Monte Carlo over 300 seeds</small></h2>
+        <p class="hint">Runs this scenario 300 times with different seeds. On a healthy release, the rollback rate is the false-positive rate, which should stay at or below α. With a regression, it shows detection power.</p>
+        <button type="button" id="mc">Run 300 rollouts</button>
+        <div class="mc-result" id="mc-out" aria-live="polite"></div>
+      </section>
+    </div>
+  </div>
+
+  <section class="card mt-16" id="how">
+    <h2>How it works</h2>
+    <p>Each minute, traffic splits between stable and canary by the current step weight. Errors are drawn from binomial distributions and latencies from log-normal ones, using a seeded PRNG so every run can be reproduced. Every few minutes the analysis compares everything collected in the current step:</p>
+    <ul>
+      <li><strong>Errors:</strong> a one-sided Fisher's exact test. At 1% weight the canary sees a few hundred requests and single-digit error counts. A normal-approximation z-test fired at 1.2% against a nominal 1% in this simulator's own Monte Carlo runs, so the exact test replaced it.</li>
+      <li><strong>Latency:</strong> a one-sided Mann-Whitney U test, which makes no normality assumption about tail-heavy latency.</li>
+      <li><strong>Peeking:</strong> repeated looks inflate false positives, so α is split evenly across every look and both metrics (Bonferroni).</li>
+      <li><strong>Practical significance:</strong> the step fails only if the result is significant <em>and</em> the effect is large enough to matter (+0.2 percentage points of errors, or more than 10% slower at p50).</li>
+    </ul>
+    <p class="hint">Exposure compares the canary with an all-at-once deploy over the same wall-clock time. Everything runs locally in your browser.</p>
+  </section>
+</main>
+
+<footer class="site"><div class="wrap">
+  <span>Built by <a href="https://github.com/mizcausevic-dev">Miz Causevic</a> · Kinetic Gain LLC</span>
+  <span>MIT licensed · zero dependencies</span>
+</div></footer>
+<script type="module" src="src/app.js"></script>
+</body>
+</html>
